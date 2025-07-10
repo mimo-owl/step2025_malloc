@@ -14,7 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-// #define BIN_COUNT 10 // 10個のbinを用意
+#define BIN_COUNT 12 // 12個のbinを用意
 
 //
 // Interfaces to get memory pages from OS
@@ -33,9 +33,9 @@ typedef struct my_metadata_t {
 } my_metadata_t;
 
 typedef struct my_heap_t {
-  my_metadata_t *free_head;
+  // my_metadata_t *free_head;
+  my_metadata_t *bins[BIN_COUNT];
   my_metadata_t dummy;
-  // my_metadata_t *bins[BIN_COUNT];  // 各 bin（サイズ別の格納場所）の先頭ポインタ
 } my_heap_t;
 
 //
@@ -47,33 +47,30 @@ my_heap_t my_heap;
 // Helper functions (feel free to add/remove/edit!)
 //
 
-void my_add_to_free_list(my_metadata_t *metadata) {
-  assert(!metadata->next);
-  metadata->next = my_heap.free_head;
-  my_heap.free_head = metadata;
+int get_bin_index(size_t size) {
+  if (size <= 1000) return (size - 1) / 100; // 0〜9
+  else if (size <= 2000) return 10;          // 1001〜2000
+  else return 11;                            // 2001〜
 }
 
-void my_remove_from_free_list(my_metadata_t *metadata, my_metadata_t *prev) {
+void my_add_to_free_list(my_metadata_t *metadata) {
+  assert(!metadata->next);
+  // metadata->next = my_heap.free_head;
+  // my_heap.free_head = metadata;
+  int bin_index = get_bin_index(metadata->size);
+  metadata->next = my_heap.bins[bin_index];
+  my_heap.bins[bin_index] = metadata;
+}
+
+void my_remove_from_free_list(my_metadata_t *metadata, my_metadata_t *prev, int bin_index) {
   if (prev) {
     prev->next = metadata->next;
   } else {
-    my_heap.free_head = metadata->next;
+    // my_heap.free_head = metadata->next;
+    my_heap.bins[bin_index] = metadata->next;
   }
   metadata->next = NULL;
 }
-
-// int get_bin_index(size_t size) {
-//   if (size <= 32) return 0;
-//   else if (size <= 64) return 1;
-//   else if (size <= 128) return 2;
-//   else if (size <= 256) return 3;
-//   else if (size <= 512) return 4;
-//   else if (size <= 1024) return 5;
-//   else if (size <= 2048) return 6;
-//   else if (size <= 3072) return 7;
-//   else if (size <= 4096) return 8;
-//   else return 9;
-// }
 
 //
 // Interfaces of malloc (DO NOT RENAME FOLLOWING FUNCTIONS!)
@@ -81,9 +78,12 @@ void my_remove_from_free_list(my_metadata_t *metadata, my_metadata_t *prev) {
 
 // This is called at the beginning of each challenge.
 void my_initialize() {
-  my_heap.free_head = &my_heap.dummy;
-  my_heap.dummy.size = 0;
-  my_heap.dummy.next = NULL;
+  // my_heap.free_head = &my_heap.dummy;
+  // my_heap.dummy.size = 0;
+  // my_heap.dummy.next = NULL;
+  for (int i = 0; i < BIN_COUNT; i++) {
+    my_heap.bins[i] = NULL;
+  }
 }
 
 // my_malloc() is called every time an object is allocated.
@@ -91,15 +91,46 @@ void my_initialize() {
 // 4000. You are not allowed to use any library functions other than
 // mmap_from_system() / munmap_to_system().
 void *my_malloc(size_t size) {
-  my_metadata_t *metadata = my_heap.free_head;
   my_metadata_t *prev = NULL;
+
+  // best fit で必要
   my_metadata_t *best_fit = NULL;
   my_metadata_t *best_fit_prev = NULL;
+  size_t min_diff = (size_t)-1; // 最小の差分を記録する変数。初期値は大きく取っておく。
+
+  // worst fit で必要
   my_metadata_t *worst_fit = NULL;
   my_metadata_t *worst_fit_prev = NULL;
-  my_metadata_t *curr = my_heap.free_head;
-  size_t min_diff = (size_t)-1; // 最小の差分を記録する変数。初期値は大きく取っておく。
-  size_t max_diff = 0; // 最小の差分を記録する変数。初期値は大きく取っておく。
+  size_t max_diff = 0; // 最小の差分を記録する変数。
+
+  // free list bin 実装のために必要
+  int start_bin = get_bin_index(size);
+  int best_fit_bin = -1;
+
+  // ################# free list bin + best-fit : 要求サイズを満たす最小のbinの中の、best-fitを探す #################
+  for (int bin = start_bin; bin < BIN_COUNT; bin++) {
+    my_metadata_t *curr = my_heap.bins[bin];
+    my_metadata_t *prev = NULL;
+
+    while (curr) { // 各binの中身を見ていく
+      if (curr->size >= size) { // 必要なサイズ以上の空き領域がある場合
+        size_t diff = curr->size - size;
+        if (diff < min_diff) {
+          best_fit = curr;
+          best_fit_prev = prev;
+          best_fit_bin = bin;
+          min_diff = diff;
+        }
+      }
+      prev = curr;
+      curr = curr->next;
+    }
+
+    // 完全にフィットなら探索を打ち切る（それがベストなので）
+    if (min_diff == 0) break;
+  }
+
+
 
   // First-fit: Find the first free slot the object fits.
   // TODO: Update this logic to Best-fit!
@@ -163,21 +194,22 @@ void *my_malloc(size_t size) {
   //   my_add_to_free_list(new_metadata);
 
   // ################# Best-fit: Find the smallest free slot that can fit the object. ######################
-  while (curr) { //リストの終わりまで見ていく
-    if (curr->size >= size) { // 必要なサイズ以上の空き領域がある場合
-      size_t diff = curr->size - size; // 見ている領域のサイズと必要なサイズの差分を計算
-      if (diff < min_diff) { //
-        best_fit = curr;
-        best_fit_prev = prev; // best_fit の１つ前の要素。
-        /*
-        補足:　↑最後まで見ていくからこそ、後でprevを見ると、bestの１つ前ではなくなるので、best_fit のprev を保存しておく必要がある。
-        */
-        min_diff = diff;
-      }
-    }
-    prev = curr;
-    curr = curr->next;
-  }
+  // printf("my_malloc: size = %zu\n", size);
+  // while (curr) { //リストの終わりまで見ていく
+  //   if (curr->size >= size) { // 必要なサイズ以上の空き領域がある場合
+  //     size_t diff = curr->size - size; // 見ている領域のサイズと必要なサイズの差分を計算
+  //     if (diff < min_diff) { //
+  //       best_fit = curr;
+  //       best_fit_prev = prev; // best_fit の１つ前の要素。
+  //       /*
+  //       補足:　↑最後まで見ていくからこそ、後でprevを見ると、bestの１つ前ではなくなるので、best_fit のprev を保存しておく必要がある。
+  //       */
+  //       min_diff = diff;
+  //     }
+  //   }
+  //   prev = curr;
+  //   curr = curr->next;
+  // }
 
   if (!best_fit) { // best fit が見つからなかった（つまり 必要容量を入れられるメモリがない）場合
     // 4096バイトのメモリをosからもらい、再度 my_malloc() を呼び出す。
@@ -191,7 +223,8 @@ void *my_malloc(size_t size) {
 
   void *ptr = best_fit + 1;
   size_t remaining_size = best_fit->size - size; // 余っているサイズを計算
-  my_remove_from_free_list(best_fit, best_fit_prev); // best_fitブロックは今から使用するので、free_list からは削除
+  // my_remove_from_free_list(best_fit, best_fit_prev); // best_fitブロックは今から使用するので、free_list からは削除
+  my_remove_from_free_list(best_fit, best_fit_prev, best_fit_bin); // free list bin 実装で関数の引数を追加したので、変更
 
   // 空きに余裕があれば、余りを free_list に追加する処理
   if (remaining_size > sizeof(my_metadata_t)) {
